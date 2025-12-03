@@ -76,18 +76,72 @@ class InsightEngine:
         df = pd.read_csv(data_path)
         df.columns = [c.strip().lower() for c in df.columns]
 
+        cols = set(df.columns)
+
+        # Auto-detect schema and adapt configuration
+        # 1) Message/label style datasets
+        if {"message", "label"}.issubset(cols):
+            self.config.target_column = "label"
+            self.config.numeric_features = []
+            self.config.categorical_features = ["message"]
+
+        # 2) KAG conversion style datasets (default)
+        elif {"approved_conversion", "impressions", "clicks"}.issubset(cols):
+            self.config.target_column = "approved_conversion"
+            self.config.numeric_features = [
+                "impressions",
+                "clicks",
+                "spent",
+                "total_conversion",
+                "interest",
+            ]
+            self.config.categorical_features = [
+                "age",
+                "gender",
+                "xyz_campaign_id",
+                "fb_campaign_id",
+            ]
+
         target = self.config.target_column
         if target not in df.columns:
             if "converted" in df.columns:
                 df[target] = df["converted"]
-            elif "approved_conversions" in df.columns:
-                df[target] = df["approved_conversions"]
+            elif "approved_conversion" in df.columns:
+                df[target] = df["approved_conversion"]
             else:
                 raise KeyError(
                     f"Could not find target column '{target}'. Available columns: {list(df.columns)}"
                 )
 
-        df[target] = (pd.to_numeric(df[target], errors="coerce") > 0).astype(int)
+        # Target preparation
+        if target == "label":
+            labels = df[target].astype(str).str.strip().str.lower()
+            mapping = {
+                "ham": 0,
+                "spam": 1,
+                "no": 0,
+                "yes": 1,
+                "0": 0,
+                "1": 1,
+                "false": 0,
+                "true": 1,
+                "negative": 0,
+                "positive": 1,
+            }
+            if labels.isin(mapping).all():
+                df[target] = labels.map(mapping).astype(int)
+            else:
+                uniques = sorted(labels.unique())
+                if len(uniques) == 2:
+                    auto_map = {uniques[0]: 0, uniques[1]: 1}
+                    df[target] = labels.map(auto_map).astype(int)
+                else:
+                    raise ValueError(
+                        f"Could not map label values to 0/1. Unique labels: {uniques}"
+                    )
+        else:
+            df[target] = (pd.to_numeric(df[target], errors="coerce") > 0).astype(int)
+
         for column in self.config.numeric_features:
             if column in df.columns:
                 df[column] = pd.to_numeric(df[column], errors="coerce")
@@ -170,6 +224,12 @@ class InsightEngine:
         summary: Dict[str, Dict[str, float] | float] = {
             "overall_rate": round(float(df[target].mean()), 3)
         }
+
+        # Generic label distribution (works for message/label datasets)
+        if target == "label":
+            summary["by_label"] = (
+                df[target].value_counts(normalize=True).round(3).to_dict()
+            )
 
         if "age" in df.columns:
             summary["by_age"] = (
